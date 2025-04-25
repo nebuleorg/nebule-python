@@ -11,7 +11,7 @@ import binascii
 BOOTSTRAP_NAME = 'bootstrap'
 BOOTSTRAP_SURNAME = 'nebule/bootstrap'
 BOOTSTRAP_AUTHOR = 'Project nebule'
-BOOTSTRAP_VERSION = '020250220'
+BOOTSTRAP_VERSION = '020250425'
 BOOTSTRAP_LICENCE = 'GNU GPL 2010-2025'
 BOOTSTRAP_WEBSITE = 'www.nebule.org'
 BOOTSTRAP_NODE = '88848d09edc416e443ce1491753c75d75d7d8790c1253becf9a2191ac369f4ea.sha2.256'
@@ -65,7 +65,7 @@ def log_add(message, level='msg', function='', uid='00000000'):
     syslog.syslog(f'LogT={diffdate} LogL="{level}" LogI="{uid}" LogF="{function}" LogM="{message}"')
 
 
-def log_addDisp(message, level='msg', function='', uid='00000000'):
+def log_add_disp(message, level='msg', function='', uid='00000000'):
     log_add(message, level, function, uid)
     print(f'{level}({function}) : {uid} : {message}')
 
@@ -110,6 +110,7 @@ LIB_LOCAL_LINKS_FOLDER = 'l'
 LIB_LOCAL_OBJECTS_FOLDER = 'o'
 LIB_LOCAL_HISTORY_FILE = 'h'
 LIB_NID_MIN_HASH_SIZE = 64
+LIB_NID_MIN_NONE_SIZE = 8
 LIB_NID_MAX_HASH_SIZE = 8192
 LIB_NID_MIN_ALGO_SIZE = 2
 LIB_NID_MAX_ALGO_SIZE = 12
@@ -360,7 +361,7 @@ LIB_CONFIGURATIONS_NAME = (
     'permitSessionBuffer',
     'permitBufferIO',
     'sessionBufferSize',
-    'defaultCurrentEntity',
+    'defaultEntity',
     'defaultApplication',
     'permitApplication1',
     'permitApplication2',
@@ -446,7 +447,7 @@ LIB_CONFIGURATIONS_TYPE = (
     ('permitSessionBuffer', 'boolean'),
     ('permitBufferIO', 'boolean'),
     ('sessionBufferSize', 'integer'),
-    ('defaultCurrentEntity', 'string'),
+    ('defaultEntity', 'string'),
     ('defaultApplication', 'string'),
     ('permitApplication1', 'boolean'),
     ('permitApplication2', 'boolean'),
@@ -532,7 +533,7 @@ LIB_CONFIGURATIONS_DEFAULT = (
     ('permitSessionBuffer', True),
     ('permitBufferIO', True),
     ('sessionBufferSize', 1000),
-    ('defaultCurrentEntity', LIB_DEFAULT_PUPPETMASTER_EID),
+    ('defaultEntity', LIB_DEFAULT_PUPPETMASTER_EID),
     ('defaultApplication', '1'),
     ('permitApplication1', True),
     ('permitApplication2', True),
@@ -549,77 +550,82 @@ LIB_CONFIGURATIONS_DEFAULT = (
 )
 
 
-def lib_getConfigurationAsString(name):
+nebule_ghost_public_entity = ''
+nebule_ghost_private_entity = ''
+nebule_ghost_password_entity = ''
+
+
+def lib_get_option_as_string(name):
     if name == '' or not (name in LIB_CONFIGURATIONS_NAME):
         return ''
     # TODO
 
-def lib_getConfigurationAsBool(name):
+def lib_get_option_as_bool(name):
     if name == '' or not (name in LIB_CONFIGURATIONS_NAME):
-        return lib_getConfigurationAsString(name)
+        return lib_get_option_as_string(name)
     # TODO
 
 
-def lib_incrementMetrology(type):
-    # TODO
-    return ''
-
-
-def lib_getMetrology(type):
+def lib_increment_metrology(type):
     # TODO
     return ''
 
 
-def lib_setMetrologyTimer(type):
+def lib_get_metrology(type):
     # TODO
     return ''
 
 
-def lib_getMetrologyTimer(type):
+def lib_set_metrology_timer(type):
+    # TODO
+    return ''
+
+
+def lib_get_metrology_timer(type):
     # TODO
     return ''
 
 
 def lib_init():
     if not io_open():
-        bootstrap_setBreak('81', traceback.extract_stack()[0][3])
-    puppetmaster = lib_getConfigurationAsString('puppetmaster')
+        bootstrap_set_break('81', traceback.extract_stack()[0][3])
+    puppetmaster = lib_get_option_as_string('puppetmaster')
     # TODO
 
     return True
 
 
 def io_open():
-    if not io_checkLinkFolder() or not io_checkObjectFolder():
+    if not io_check_link_folder() or not io_check_object_folder():
         return False
     return True
 
 
-def io_checkLinkFolder():
+def io_check_link_folder():
     if not os.path.isdir(LIB_LOCAL_LINKS_FOLDER):
-        io_createLinkFolder()
+        io_create_link_folder()
     if not os.path.isdir(LIB_LOCAL_LINKS_FOLDER):
-        bootstrap_setBreak('22', traceback.extract_stack()[0][3])
+        bootstrap_set_break('22', traceback.extract_stack()[0][3])
         return False
     # TODO
 
     return True
 
 
-def io_checkObjectFolder():
+def io_check_object_folder():
     if not os.path.isdir(LIB_LOCAL_OBJECTS_FOLDER):
-        io_createObjectFolder()
+        io_create_object_folder()
     if not os.path.isdir(LIB_LOCAL_OBJECTS_FOLDER):
-        bootstrap_setBreak('24', traceback.extract_stack()[0][3])
+        bootstrap_set_break('24', traceback.extract_stack()[0][3])
         return False
     # TODO
 
     return True
 
 
-def io_createLinkFolder():
-    if lib_getConfigurationAsBool('permitWrite') \
-            and lib_getConfigurationAsBool('permitWriteLink') \
+def io_create_link_folder():
+    if lib_get_option_as_bool('permitWrite') \
+            and lib_get_option_as_bool('permitWriteLink') \
             and not os.path.isdir(LIB_LOCAL_LINKS_FOLDER):
         os.mkdir(LIB_LOCAL_LINKS_FOLDER)
     if os.path.isdir(LIB_LOCAL_LINKS_FOLDER):
@@ -627,9 +633,9 @@ def io_createLinkFolder():
     return False
 
 
-def io_createObjectFolder():
-    if lib_getConfigurationAsBool('permitWrite') \
-            and lib_getConfigurationAsBool('permitWriteLink') \
+def io_create_object_folder():
+    if lib_get_option_as_bool('permitWrite') \
+            and lib_get_option_as_bool('permitWriteLink') \
             and not os.path.isdir(LIB_LOCAL_OBJECTS_FOLDER):
         os.mkdir(LIB_LOCAL_OBJECTS_FOLDER)
     if os.path.isdir(LIB_LOCAL_OBJECTS_FOLDER):
@@ -637,34 +643,38 @@ def io_createObjectFolder():
     return False
 
 
-def io_checkNodeHaveLink(nid):
+def io_check_node_have_link(nid):
     if os.path.isfile(f'{LIB_LOCAL_LINKS_FOLDER}/{nid}'):
         return True
     return False
 
 
-def io_checkNodeHaveContent(nid):
+def io_check_node_have_content(nid):
     if os.path.isfile(f'{LIB_LOCAL_OBJECTS_FOLDER}/{nid}'):
         return True
     return False
 
 
-def nod_check(nid, check):
-    # TODO
-    return True
-
-
-def _genDate():
-    return '0' + datetime.date.year() + datetime.date.month() + datetime.date.day() \
-             + datetime.time.hour() + datetime.time.minute() + datetime.time.second()
-
-
-def blk_generate(rc, req, nid1, nid2, nid3, nid4):
-    if req == '' or not nod_check(nid1) or not nod_check(nid2) or not nod_check(nid3) or not nod_check(nid4):
+def crypto_asymmetric_encrypt(data, private_oid, password, entity_check):
+    if private_oid == '' or password == '' or data == '' or (entity_check and not ent_check_is_private_key(private_oid)):
         return ''
-    bh = 'LIB_LINK_VERSION'
-    if rc == '' or not lnk_checkRC(rc):
-        rc = '0>0' + _genDate()
+    private_cert = ''
+
+    # FIXME
+    return ''
+
+
+def blk_generate(rc='', req='', nid1='', nid2='', nid3='', nid4=''):
+    if (req == ''
+            or not nod_check_nid(nid1, False, False)
+            or not nod_check_nid(nid2, True, False)
+            or not nod_check_nid(nid3, True, False)
+            or not nod_check_nid(nid4, True, False)):
+        return ''
+    bh = f"nebule:link/{LIB_LINK_VERSION}"
+    if rc == '' or not lnk_check_rc(rc):
+        date = datetime.datetime.now()
+        rc = '0>0' + date.strftime('0%Y%m%d%H%M%S')
     rl = req + '>' + nid1
     if nid2 != '' and nid2 != '0':
         rl = rl + '>' + nid2
@@ -676,62 +686,79 @@ def blk_generate(rc, req, nid1, nid2, nid3, nid4):
     return bh + '_' + bl
 
 
-def blk_sign():
+def blk_sign(bh_bl):
+    if bh_bl == '':
+        return ''
+
+    if not ent_check_is_public_key(nebule_ghost_public_entity):
+        return ''
+
+    if not ent_check_is_private_key(nebule_ghost_private_entity):
+        return ''
+
+    if nebule_ghost_password_entity == '':
+        return ''
+
+    sign = crypto_asymmetric_encrypt(bh_bl, nebule_ghost_private_entity, nebule_ghost_password_entity, True)
+    if sign == '':
+        return ''
+
+    return f"{bh_bl}_{sign}"
+
+
+def blk_generate_sign(rc='', req='', nid1='', nid2='', nid3='', nid4=''):
+    bh_bl = blk_generate(rc, req, nid1, nid2, nid3, nid4)
+    if bh_bl == '':
+        return ''
+    return blk_sign(bh_bl)
+
+
+def lnk_get_list():
     # TODO
     return True
 
 
-def blk_generateSign():
+def lnk_check_exist():
     # TODO
     return True
 
 
-def lnk_getList():
+def lnk_check_not_suppressed():
     # TODO
     return True
 
 
-def lnk_checkExist():
+def lnk_date_compare():
     # TODO
     return True
 
 
-def lnk_checkNotSuppressed():
+def blk_filter_structure():
     # TODO
     return True
 
 
-def lnk_dateCompare():
+def blk_filter_by_signers():
     # TODO
     return True
 
 
-def blk_filterStructure():
+def lnk_get_list_filter_nid():
     # TODO
     return True
 
 
-def blk_filterBySigners():
+def lnk_get_distant_anywhere():
     # TODO
     return True
 
 
-def lnk_getListFilterNid():
+def lnk_get_distant_on_locations():
     # TODO
     return True
 
 
-def lnk_getDistantAnywhere():
-    # TODO
-    return True
-
-
-def lnk_getDistantOnLocations():
-    # TODO
-    return True
-
-
-def blk_checkBH(bh):
+def blk_check_bh(bh):
     if len(bh) > 15:
         return False
     i = bh.find('/')
@@ -741,54 +768,54 @@ def blk_checkBH(bh):
     rv = bh[i + 1:]
     if rv.len == 0:
         return False
-    if not blk_checkRF(rf):
+    if not blk_check_rf(rf):
         return False
-    if not blk_checkRV(rv):
+    if not blk_check_rv(rv):
         return False
     return True
 
 
-def blk_checkRF(rf):
+def blk_check_rf(rf):
     # TODO
     return True
 
 
-def blk_checkRV(rv):
+def blk_check_rv(rv):
     # TODO
     return True
 
 
-def blk_checkBL(bl):
+def blk_check_bl(bl):
     # TODO
     return True
 
 
-def lnk_checkRC(rc):
+def lnk_check_rc(rc):
     # TODO
     return True
 
 
-def lnk_checkRL(rl):
+def lnk_check_rl(rl):
     # TODO
     return True
 
 
-def lnk_checkREQ(req):
+def lnk_check_req(req):
     # TODO
     return True
 
 
-def blk_checkBS(bs):
+def blk_check_bs(bs):
     # TODO
     return True
 
 
-def blk_checkRS(rs):
+def blk_check_rs(rs):
     # TODO
     return True
 
 
-def blk_checkSIG(sig):
+def blk_check_sig(sig):
     # TODO
     return True
 
@@ -808,43 +835,99 @@ def blk_write():
     return True
 
 
-def bootstrap_setBreak(errorCode, function):
-    errorDesc = _getFromArray(BREAK_DESCRIPTIONS, errorCode)
-    if errorDesc == '':
-        errorDesc = _getFromArray(BREAK_DESCRIPTIONS, '00')
-    bootstrapBreak.append([errorCode, errorDesc])
-    log_add(f'bootstrap break code={errorCode} : {errorDesc}', 'error', function, f'100000{errorCode}')
-
-
-def bootstrap_getUserBreak():
+def nod_check(nid, check):
     # TODO
     return True
 
 
-def bootstrap_displayRouter():
+def nod_check_nid(nid = '', permit_null = False, permit_zero = False):
+    if permit_null and nid == '':
+        return True
+    if permit_zero and nid == '0':
+        return True
+
+    l = nid.split('.')
+    if len(l) != 3:
+        print(f"invalid parts count nid={nid}")
+        return False
+
+    hash_val = l[0]
+    algo_val = l[1]
+    size_val = l[2]
+
+    if algo_val == 'none' or algo_val == 'string':
+        min_size = LIB_NID_MIN_NONE_SIZE
+    else:
+        min_size = LIB_NID_MIN_HASH_SIZE
+
+    hash_ok = True
+    valid = 'abcdef0123456789'
+    for c in hash_val:
+        if c not in valid:
+            hash_ok = False
+            break
+    if (hash_val == ''
+            or not min_size < (len(hash_val) * 4) < LIB_NID_MAX_HASH_SIZE
+            or not hash_ok):
+        print(f"invalid hash value {hash_val}")
+        return False
+
+    if algo_val == '' or not LIB_NID_MIN_ALGO_SIZE < len(algo_val) < LIB_NID_MAX_ALGO_SIZE:
+        print(f"invalid algo value {algo_val}")
+        return False
+
+    if (size_val == '' or not min_size < int(size_val) < LIB_NID_MAX_HASH_SIZE
+            or (len(hash_val) * 4) != int(size_val)):
+        print(f"invalid size value {size_val}")
+        return False
+    return True
+
+
+def ent_check_is_public_key(nid):
+    return True
+
+
+def ent_check_is_private_key(nid):
+    return True
+
+
+def bootstrap_set_break(errorCode, function):
+    errorDesc = _get_from_array(BREAK_DESCRIPTIONS, errorCode)
+    if errorDesc == '':
+        errorDesc = _get_from_array(BREAK_DESCRIPTIONS, '00')
+    bootstrapBreak.append([errorCode, errorDesc])
+    log_add(f'bootstrap break code={errorCode} : {errorDesc}', 'error', function, f'100000{errorCode}')
+
+
+def bootstrap_get_user_break():
+    # TODO
+    return True
+
+
+def bootstrap_display_router():
     if False == True:  # FIXME check need first sync
         log_add('load first', 'msg', traceback.extract_stack()[0][3], '63d9bc00')
     if len(bootstrapBreak) != 0:
         log_add('load break', 'msg', traceback.extract_stack()[0][3], '4abf554b')
         return
     # TODO
-    log_addDisp('TEST')
+    log_add_disp('TEST')
 
 
-def bootstrap_logMetrology():
+def bootstrap_log_metrology():
     timers = ''
 
 
 def main():
     print('Start')
     if not lib_init():
-        bootstrap_setBreak('21', traceback.extract_stack()[0][3])
-    bootstrap_displayRouter()
+        bootstrap_set_break('21', traceback.extract_stack()[0][3])
+    bootstrap_display_router()
     # TODO
-    bootstrap_logMetrology()
+    bootstrap_log_metrology()
 
 
-def _getFromArray(array, name):
+def _get_from_array(array, name):
     for line in array:
         if line[0] == name:
             return line[1]
@@ -852,4 +935,5 @@ def _getFromArray(array, name):
 
 
 # OK, now play...
-main()
+if __name__ == '__main__':
+    main()

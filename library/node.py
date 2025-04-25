@@ -1,5 +1,7 @@
 # ------------------------------------------------------------------------------------------
 # Imports
+import nebule
+import Crypto
 
 # ------------------------------------------------------------------------------------------
 #  /// WARNING /// WARNING /// WARNING /// WARNING /// WARNING /// WARNING /// WARNING ///
@@ -24,13 +26,18 @@ class Node:
     isNew = False
 
     def __init__(self, nid):
-        if self.checkNID(nid):
+        if nebule.nod_check_nid(nid):
             self.nodeId = nid
         else:
             self.nodeId = '0'
             self.isNew = True
 
-    def checkNID(self, nid):
+    def check_nid(self, nid, permit_null, permit_zero):
+        if permit_null and nid == '':
+            return True
+        if permit_zero and nid == '0':
+            return True
+        hash = Crypto.get_hash(nid)
         return True
 
 class Group(Node):
