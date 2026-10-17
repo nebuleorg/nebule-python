@@ -3,6 +3,11 @@ Nebule Link Interface
 
 This module defines the interface for link operations in the nebule library.
 It is equivalent to 500_link_interface.php in the PHP version.
+
+Link field naming convention:
+The fields of a link register (RL) are named NID1, NID2, NID3, NID4
+(formerly source, target, meta/type, data) as in the PHP implementation.
+RL format: REQ>NID1>NID2>NID3>NID4
 """
 
 from abc import ABC, abstractmethod
@@ -27,15 +32,15 @@ class LinkInterface(ABC):
         pass
     
     @abstractmethod
-    def link_new(self, source, target, type_link, data=''):
+    def link_new(self, nid1, nid2, nid3, nid4='0'):
         """
         Create a new link.
         
         Args:
-            source (str): Source node identifier
-            target (str): Target node identifier
-            type_link (str): Type of link
-            data (str): Optional link data
+            nid1 (str): First node identifier (NID1)
+            nid2 (str): Second node identifier (NID2)
+            nid3 (str): Third node identifier (NID3, can be a type or meta)
+            nid4 (str): Fourth node identifier (NID4, optional, '0' if unused)
             
         Returns:
             str: New link identifier or empty string on failure
@@ -95,40 +100,40 @@ class LinkInterface(ABC):
         pass
     
     @abstractmethod
-    def link_get_source(self, lid):
+    def link_get_nid1(self, lid):
         """
-        Get the source node of a link.
+        Get the NID1 field of a link.
         
         Args:
             lid (str): Link identifier
             
         Returns:
-            str: Source node identifier
+            str: NID1 node identifier
         """
         pass
     
     @abstractmethod
-    def link_get_target(self, lid):
+    def link_get_nid2(self, lid):
         """
-        Get the target node of a link.
+        Get the NID2 field of a link.
         
         Args:
             lid (str): Link identifier
             
         Returns:
-            str: Target node identifier
+            str: NID2 node identifier
         """
         pass
     
     @abstractmethod
-    def link_get_type(self, lid):
+    def link_get_nid3(self, lid):
         """
-        Get the type of a link.
+        Get the NID3 field of a link.
         
         Args:
             lid (str): Link identifier
             
         Returns:
-            str: Link type
+            str: NID3 node identifier (type or meta)
         """
         pass

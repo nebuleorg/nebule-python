@@ -47,7 +47,6 @@ import argparse
 import hashlib
 import os
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -194,12 +193,18 @@ def compute_file_hash(filepath, algorithm='sha256'):
     """
     Compute the cryptographic hash of a file.
     
+    IMPORTANT: The file content is read in raw bytes mode and NOT modified before hash computation.
+    This matches the PHP behavior where content is not converted/altered.
+    
     Args:
         filepath (str): Path to the file to hash
         algorithm (str): Hash algorithm to use (default: 'sha256')
         
     Returns:
         str: Hexadecimal hash digest of the file content
+        
+    Raises:
+        FileNotFoundError: If the file does not exist
     """
     if not os.path.isfile(filepath):
         raise FileNotFoundError(f"File not found: {filepath}")
@@ -233,15 +238,26 @@ def compute_file_hash(filepath, algorithm='sha256'):
 
 def compute_content_hash(content, algorithm='sha256'):
     """
-    Compute the cryptographic hash of a content string.
+    Compute the cryptographic hash of content bytes.
+    
+    IMPORTANT: The content MUST be bytes and will NOT be modified before hash computation.
+    This matches the PHP behavior where content is not converted/altered.
+    If you have a string, encode it to bytes yourself before calling this function.
     
     Args:
-        content (str): Content to hash
+        content (bytes): Raw bytes content to hash - MUST NOT be modified
         algorithm (str): Hash algorithm to use (default: 'sha256')
         
     Returns:
         str: Hexadecimal hash digest of the content
+        
+    Raises:
+        TypeError: If content is not bytes
     """
+    # Content MUST be bytes - no conversion, no modification
+    if not isinstance(content, bytes):
+        raise TypeError(f"content must be bytes (not modified), got {type(content).__name__}")
+    
     # Map nebule hash names to Python hashlib names
     algo_map = {
         'sha2.256': 'sha256',
@@ -261,14 +277,13 @@ def compute_content_hash(content, algorithm='sha256'):
     except ValueError:
         raise ValueError(f"Unsupported hash algorithm: {algorithm}")
     
-    # Encode string to bytes
-    content_bytes = content.encode('utf-8')
-    hash_obj.update(content_bytes)
+    # Use raw bytes directly without any modification
+    hash_obj.update(content)
     
     return hash_obj.hexdigest()
 
 
-def format_node_id(hash_value, algorithm='sha2.256', size=None):
+def format_node_id(hash_value, algorithm='sha2.256'):
     """
     Format a node ID (NID) according to nebule naming convention.
     
@@ -279,13 +294,41 @@ def format_node_id(hash_value, algorithm='sha2.256', size=None):
     <hash>.sha2.256
     
     Args:
-        hash_value (str): The hash digest (hexadecimal)
-        algorithm (str): The hash algorithm (default: 'sha2.256')
-        size (int or None): Not used, algorithm already contains size
+        hash_value (str): The hash digest (hexadecimal, lowercase)
+        algorithm (str): The hash algorithm (lowercase with a dot in the middle, e.g., 'sha2.256')
         
     Returns:
         str: Formatted node ID
+        
+    Raises:
+        TypeError: If hash_value or algorithm are not strings
+        ValueError: If hash_value contains non-hexadecimal characters or is not lowercase
+                   If algorithm is not lowercase or does not contain exactly one dot
     """
+    # Verify hash_value is a string
+    if not isinstance(hash_value, str):
+        raise TypeError(f"hash_value must be a string, got {type(hash_value).__name__}")
+    
+    # Verify hash_value contains only lowercase hexadecimal characters
+    if hash_value == '':
+        raise ValueError("hash_value cannot be empty")
+    
+    valid_hex_chars = set('0123456789abcdef')
+    if not all(c in valid_hex_chars for c in hash_value):
+        raise ValueError(f"hash_value must contain only lowercase hexadecimal characters, got: {hash_value}")
+    
+    # Verify algorithm is a string
+    if not isinstance(algorithm, str):
+        raise TypeError(f"algorithm must be a string, got {type(algorithm).__name__}")
+    
+    # Verify algorithm is lowercase
+    if algorithm != algorithm.lower():
+        raise ValueError(f"algorithm must be lowercase, got: {algorithm}")
+    
+    # Verify algorithm contains exactly one dot
+    if algorithm.count('.') != 1:
+        raise ValueError(f"algorithm must contain exactly one dot, got: {algorithm}")
+    
     return f"{hash_value}.{algorithm}"
 
 
@@ -309,26 +352,30 @@ def create_bh(version=LIB_LINK_VERSION):
     return f"nebule:link/{version}"
 
 
-def create_rc(timestamp=None):
+def create_rc(datetime_obj=None):
     """
     Create Chronology Register (RC) for a link.
     
     Format: MOD>CHR
-    Where MOD is the mode (currently always "0") and CHR is a timestamp.
+    Where:
+    - MOD is the mode (currently always "0")
+    - CHR is a timestamp in the same format as `date "+0%Y%m%d%H%M%S"` command,
+      i.e. "0YYYYMMDDHHMMSS" (15 characters, starting with 0).
+      Example: "020261017205829" for 2026-10-17 20:58:29.
     
     Args:
-        timestamp (int or None): Unix timestamp. If None, current time is used.
+        datetime_obj (datetime or None): Datetime object. If None, current time is used.
         
     Returns:
-        str: Chronology Register string
+        str: Chronology Register string in format "0>0YYYYMMDDHHMMSS"
     """
-    if timestamp is None:
-        timestamp = int(time.time())
+    if datetime_obj is None:
+        datetime_obj = datetime.now()
     
-    # Format timestamp to match PHP format (no leading zeros issue, just use full number)
-    # PHP uses format like "020210714195523" which appears to be a custom date format
-    # For now, we'll use the Unix timestamp directly
-    return f"0>{timestamp}"
+    # Format CHR as "0YYYYMMDDHHMMSS" (same as bash: date "+0%Y%m%d%H%M%S")
+    chr_value = datetime_obj.strftime('0%Y%m%d%H%M%S')
+    
+    return f"0>{chr_value}"
 
 
 def create_rl(req_type, nids):
@@ -348,26 +395,32 @@ def create_rl(req_type, nids):
       - 'k': Encrypted object
       - 's': Subdivision
       - 'x': Link deletion
-    - NID: Node identifiers (1 to linkMaxUIDbyRL, default: 4)
+    - NID: Node identifiers (1 to LINK_MAX_UID_PER_RL, default: 4)
+      The number of NIDs is NOT padded - a link register can contain
+      as few as 1 NID (only the minimum of 1 is enforced).
     
     Args:
         req_type (str): Request type character
-        nids (list): List of node IDs (1 to 4)
+        nids (list): List of node IDs (1 to LINK_MAX_UID_PER_RL)
         
     Returns:
         str: Link Register string
+        
+    Raises:
+        ValueError: If nids is empty or contains more than LINK_MAX_UID_PER_RL elements
     """
-    # Ensure we have at least 1 NID and at most LINK_MAX_UID_PER_RL
+    # Ensure we have at least 1 NID
     if not nids:
         raise ValueError("At least one NID is required")
     
-    nids = nids[:LINK_MAX_UID_PER_RL]
+    # Ensure we have at most LINK_MAX_UID_PER_RL NIDs - error if exceeded
+    if len(nids) > LINK_MAX_UID_PER_RL:
+        raise ValueError(
+            f"Too many NIDs: {len(nids)} provided, "
+            f"maximum allowed is {LINK_MAX_UID_PER_RL}"
+        )
     
-    # Pad with '0' if we have less than required
-    while len(nids) < 3:
-        nids.append('0')
-    
-    nid_str = '>'.join(nids[:LINK_MAX_UID_PER_RL])
+    nid_str = '>'.join(nids)
     return f"{req_type}>{nid_str}"
 
 
@@ -435,20 +488,22 @@ def create_bloc_link(bh, bl, bs):
     return f"{bh}_{bl}{bs}"
 
 
-def create_simple_link(source_nid, target_nid, signer_eid, signer_password, 
+def create_simple_link(nids, signer_eid, signer_password, 
                        req_type=LINK_REQ_LINK, version=LIB_LINK_VERSION, 
                        algorithm='sha2.256'):
     """
-    Create a simple link between two nodes.
+    Create a simple link between nodes.
     
     This creates a basic link with:
     - BH: nebule:link/<version>
-    - BL: RC/RL1 where RC=0>timestamp and RL1=req_type>source>target>0
+    - BL: RC/RL1 where RC=0>timestamp and RL1=req_type>nid1>nid2>...
     - BS: _signer_eid>mock_signature.algorithm
     
+    The nids parameter accepts any number of node IDs (1 to LINK_MAX_UID_PER_RL),
+    replacing the old source/target/meta naming convention.
+    
     Args:
-        source_nid (str): Source node ID
-        target_nid (str): Target node ID
+        nids (list): List of node IDs (1 to LINK_MAX_UID_PER_RL)
         signer_eid (str): Signer entity ID
         signer_password (str): Signer's private key password (not used yet)
         req_type (str): Request type (default: 'l' for link)
@@ -457,11 +512,14 @@ def create_simple_link(source_nid, target_nid, signer_eid, signer_password,
         
     Returns:
         str: Complete bloc link string
+        
+    Raises:
+        ValueError: If nids is empty or contains more than LINK_MAX_UID_PER_RL elements
     """
     # Create components
     bh = create_bh(version)
     rc = create_rc()
-    rl = create_rl(req_type, [source_nid, target_nid])
+    rl = create_rl(req_type, nids)
     bl = create_bl(rc, [rl])
     
     # For now, use a mock signature
@@ -845,13 +903,12 @@ def main():
     log("Creating link files in l/ directory...", args.verbose)
     
     # Create a link from the master entity to the library object
-    # Format from PHP: "nebule:link/2:0_0>timestamp/l>source_nid>target_nid>0"
+    # Format from PHP: "nebule:link/2:0_0>timestamp/l>nid1>nid2..."
     # Then signed with: _signer_eid>signature.sha2.256
     
     # Create the link
     bloc_link = create_simple_link(
-        source_nid=args.master_entity,
-        target_nid=file_nid,
+        nids=[args.master_entity, file_nid],
         signer_eid=args.master_entity,
         signer_password=args.master_password
     )

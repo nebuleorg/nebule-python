@@ -16,7 +16,7 @@ class BlocLink(LinkInterface):
     def __init__(self, nebule_instance):
         self._nebule_instance = nebule_instance
     
-    def link_new(self, source, target, type_link, data=''):
+    def link_new(self, nid1, nid2, nid3, nid4='0'):
         """Create a new link."""
         # Stub
         return ''
@@ -41,17 +41,17 @@ class BlocLink(LinkInterface):
         # Stub
         return {}
     
-    def link_get_source(self, lid):
-        """Get the source node of a link."""
+    def link_get_nid1(self, lid):
+        """Get the NID1 field of a link."""
         # Stub
         return ''
     
-    def link_get_target(self, lid):
-        """Get the target node of a link."""
+    def link_get_nid2(self, lid):
+        """Get the NID2 field of a link."""
         # Stub
         return ''
     
-    def link_get_type(self, lid):
-        """Get the type of a link."""
+    def link_get_nid3(self, lid):
+        """Get the NID3 field of a link."""
         # Stub
         return 'bloclink'
