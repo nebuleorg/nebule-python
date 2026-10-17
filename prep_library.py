@@ -2,8 +2,36 @@
 """
 Preparation script for nebule Python library.
 
-This script assembles all library files from the library/ directory into a single file
-and places it in the o/ directory for use as a bundled library.
+This script assembles all library files from the library/ directory into a single file,
+computes its SHA2-256 cryptographic footprint, and places it in the o/ directory with the
+footprint as its filename (matching PHP object naming convention).
+
+It also:
+- Generates link files in the l/ directory conforming to PHP implementation
+- Creates a reference copy at nebule_library.py at the script's directory level
+
+Link Structure (according to 500_link_interface.php):
+----------------------------------------------------
+A link bloc has the structure: BH_BL_BS
+
+- BH (Block Header): nebule:link/<version> where version is like "2:0"
+- BL (Block Links): RC/RL1/RL2/...
+  - RC (Chronology Register): MOD>CHR where MOD="0" and CHR=timestamp
+  - RL (Link Register): REQ>NID1>NID2>NID3>... where:
+    * REQ: Request type (1 char):
+      - l: Link between objects
+      - f: Fork/derivative
+      - u: Update
+      - d: Delete
+      - e: Equivalent
+      - c: Concealed/encrypted link
+      - k: Encrypted object
+      - s: Subdivision
+      - x: Link deletion
+    * NID: Node identifiers (at least 1, up to linkMaxUIDbyRL, default: 4)
+- BS (Block Signature): _EID1>SIG1.EID2>SIG2...
+  - EID: Signer entity ID
+  - SIG: Cryptographic signature
 
 Usage:
     python3 prep_library.py --master-entity <entity_id> --master-password <password>
@@ -11,15 +39,45 @@ Usage:
 Options:
     --master-entity     Entity ID of the master entity
     --master-password   Private key password for the master entity
-    --output            Output file name (default: nebule_library.py)
     --clean             Clean the o/ directory before assembling
     --verbose           Show verbose output
 """
 
 import argparse
+import hashlib
 import os
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
+
+# ------------------------------------------------------------------------------------------
+# Constants for nebule
+# ------------------------------------------------------------------------------------------
+
+# Reference code algorithm
+LIB_REF_CODE_ALGO = 'sha2.256'
+
+# Local storage configuration
+LIB_LOCAL_LINKS_FOLDER = 'l'
+LIB_LOCAL_OBJECTS_FOLDER = 'o'
+
+# Link version
+LIB_LINK_VERSION = '2:0'
+
+# Maximum UIDs per link register (from PHP: linkMaxUIDbyRL)
+LINK_MAX_UID_PER_RL = 4
+
+# Link request types
+LINK_REQ_LINK = 'l'        # Link between objects
+LINK_REQ_FORK = 'f'        # Fork/derivative
+LINK_REQ_UPDATE = 'u'      # Update
+LINK_REQ_DELETE = 'd'      # Delete
+LINK_REQ_EQUIVALENT = 'e'  # Equivalent
+LINK_REQ_CONCEALED = 'c'   # Concealed/encrypted link
+LINK_REQ_ENCRYPTED = 'k'   # Encrypted object
+LINK_REQ_SUBDIVISION = 's' # Subdivision
+LINK_REQ_LINK_DELETE = 'x' # Link deletion
 
 # Library file order for correct dependency resolution
 # Note: Files are named with leading numbers to match PHP version
@@ -128,6 +186,438 @@ FOOTER_TEMPLATE = """
 """
 
 
+# ------------------------------------------------------------------------------------------
+# Hash computation functions
+# ------------------------------------------------------------------------------------------
+
+def compute_file_hash(filepath, algorithm='sha256'):
+    """
+    Compute the cryptographic hash of a file.
+    
+    Args:
+        filepath (str): Path to the file to hash
+        algorithm (str): Hash algorithm to use (default: 'sha256')
+        
+    Returns:
+        str: Hexadecimal hash digest of the file content
+    """
+    if not os.path.isfile(filepath):
+        raise FileNotFoundError(f"File not found: {filepath}")
+    
+    # Map nebule hash names to Python hashlib names
+    algo_map = {
+        'sha2.256': 'sha256',
+        'sha2.512': 'sha512',
+        'sha2.384': 'sha384',
+        'sha2.224': 'sha224',
+        'sha256': 'sha256',
+        'sha512': 'sha512',
+        'sha384': 'sha384',
+        'sha224': 'sha224',
+    }
+    
+    hash_algo = algo_map.get(algorithm, algorithm)
+    
+    try:
+        hash_obj = hashlib.new(hash_algo)
+    except ValueError:
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}")
+    
+    with open(filepath, 'rb') as f:
+        # Read file in chunks to handle large files
+        for chunk in iter(lambda: f.read(8192), b''):
+            hash_obj.update(chunk)
+    
+    return hash_obj.hexdigest()
+
+
+def compute_content_hash(content, algorithm='sha256'):
+    """
+    Compute the cryptographic hash of a content string.
+    
+    Args:
+        content (str): Content to hash
+        algorithm (str): Hash algorithm to use (default: 'sha256')
+        
+    Returns:
+        str: Hexadecimal hash digest of the content
+    """
+    # Map nebule hash names to Python hashlib names
+    algo_map = {
+        'sha2.256': 'sha256',
+        'sha2.512': 'sha512',
+        'sha2.384': 'sha384',
+        'sha2.224': 'sha224',
+        'sha256': 'sha256',
+        'sha512': 'sha512',
+        'sha384': 'sha384',
+        'sha224': 'sha224',
+    }
+    
+    hash_algo = algo_map.get(algorithm, algorithm)
+    
+    try:
+        hash_obj = hashlib.new(hash_algo)
+    except ValueError:
+        raise ValueError(f"Unsupported hash algorithm: {algorithm}")
+    
+    # Encode string to bytes
+    content_bytes = content.encode('utf-8')
+    hash_obj.update(content_bytes)
+    
+    return hash_obj.hexdigest()
+
+
+def format_node_id(hash_value, algorithm='sha2.256', size=None):
+    """
+    Format a node ID (NID) according to nebule naming convention.
+    
+    The format is: <hash>.<algo>.<size>
+    where the algorithm string is split into algo and size parts.
+    
+    For example, algorithm='sha2.256' is kept as is, resulting in:
+    <hash>.sha2.256
+    
+    Args:
+        hash_value (str): The hash digest (hexadecimal)
+        algorithm (str): The hash algorithm (default: 'sha2.256')
+        size (int or None): Not used, algorithm already contains size
+        
+    Returns:
+        str: Formatted node ID
+    """
+    return f"{hash_value}.{algorithm}"
+
+
+# ------------------------------------------------------------------------------------------
+# Link creation functions
+# ------------------------------------------------------------------------------------------
+
+def create_bh(version=LIB_LINK_VERSION):
+    """
+    Create Block Header (BH) for a link.
+    
+    Format: nebule:link/<version>
+    Example: nebule:link/2:0
+    
+    Args:
+        version (str): Link version (default: '2:0')
+        
+    Returns:
+        str: Block Header string
+    """
+    return f"nebule:link/{version}"
+
+
+def create_rc(timestamp=None):
+    """
+    Create Chronology Register (RC) for a link.
+    
+    Format: MOD>CHR
+    Where MOD is the mode (currently always "0") and CHR is a timestamp.
+    
+    Args:
+        timestamp (int or None): Unix timestamp. If None, current time is used.
+        
+    Returns:
+        str: Chronology Register string
+    """
+    if timestamp is None:
+        timestamp = int(time.time())
+    
+    # Format timestamp to match PHP format (no leading zeros issue, just use full number)
+    # PHP uses format like "020210714195523" which appears to be a custom date format
+    # For now, we'll use the Unix timestamp directly
+    return f"0>{timestamp}"
+
+
+def create_rl(req_type, nids):
+    """
+    Create Link Register (RL) for a link.
+    
+    Format: REQ>NID1>NID2>NID3>...
+    
+    Where:
+    - REQ: Request type (1 character):
+      - 'l': Link between objects
+      - 'f': Fork/derivative
+      - 'u': Update
+      - 'd': Delete
+      - 'e': Equivalent
+      - 'c': Concealed/encrypted link
+      - 'k': Encrypted object
+      - 's': Subdivision
+      - 'x': Link deletion
+    - NID: Node identifiers (1 to linkMaxUIDbyRL, default: 4)
+    
+    Args:
+        req_type (str): Request type character
+        nids (list): List of node IDs (1 to 4)
+        
+    Returns:
+        str: Link Register string
+    """
+    # Ensure we have at least 1 NID and at most LINK_MAX_UID_PER_RL
+    if not nids:
+        raise ValueError("At least one NID is required")
+    
+    nids = nids[:LINK_MAX_UID_PER_RL]
+    
+    # Pad with '0' if we have less than required
+    while len(nids) < 3:
+        nids.append('0')
+    
+    nid_str = '>'.join(nids[:LINK_MAX_UID_PER_RL])
+    return f"{req_type}>{nid_str}"
+
+
+def create_bl(rc, rls):
+    """
+    Create Block Links (BL) for a link.
+    
+    Format: RC/RL1/RL2/...
+    
+    Args:
+        rc (str): Chronology Register
+        rls (list): List of Link Registers
+        
+    Returns:
+        str: Block Links string
+    """
+    bl_parts = [rc] + rls
+    return '/'.join(bl_parts)
+
+
+def create_bs(eid, signature, algorithm='sha2.256'):
+    """
+    Create Block Signature (BS) for a link.
+    
+    Format: _EID1>SIG1.EID2>SIG2... (but typically just one signature)
+    
+    In the PHP prep script, the format is: _${eid}>${slink}.sha2.${size}
+    where slink is the hex signature.
+    
+    For now, we'll use a mock signature since we don't have the private key.
+    
+    Args:
+        eid (str): Entity ID of the signer
+        signature (str): Signature value (hex)
+        algorithm (str): Hash algorithm used for signature
+        
+    Returns:
+        str: Block Signature string
+    """
+    # For now, create a mock signature (64 hex chars for a 256-bit signature)
+    if signature == '':
+        signature = '0' * 64
+    
+    # Extract size from algorithm if it's in format like sha2.256
+    algo_parts = algorithm.split('.')
+    size = algo_parts[-1] if len(algo_parts) > 1 else '256'
+    
+    return f"_{eid}>{signature}.{algorithm}"
+
+
+def create_bloc_link(bh, bl, bs):
+    """
+    Create a complete bloc link string.
+    
+    Format: BH_BL_BS
+    
+    Args:
+        bh (str): Block Header
+        bl (str): Block Links
+        bs (str): Block Signature
+        
+    Returns:
+        str: Complete bloc link string
+    """
+    return f"{bh}_{bl}{bs}"
+
+
+def create_simple_link(source_nid, target_nid, signer_eid, signer_password, 
+                       req_type=LINK_REQ_LINK, version=LIB_LINK_VERSION, 
+                       algorithm='sha2.256'):
+    """
+    Create a simple link between two nodes.
+    
+    This creates a basic link with:
+    - BH: nebule:link/<version>
+    - BL: RC/RL1 where RC=0>timestamp and RL1=req_type>source>target>0
+    - BS: _signer_eid>mock_signature.algorithm
+    
+    Args:
+        source_nid (str): Source node ID
+        target_nid (str): Target node ID
+        signer_eid (str): Signer entity ID
+        signer_password (str): Signer's private key password (not used yet)
+        req_type (str): Request type (default: 'l' for link)
+        version (str): Link version (default: '2:0')
+        algorithm (str): Hash algorithm (default: 'sha2.256')
+        
+    Returns:
+        str: Complete bloc link string
+    """
+    # Create components
+    bh = create_bh(version)
+    rc = create_rc()
+    rl = create_rl(req_type, [source_nid, target_nid])
+    bl = create_bl(rc, [rl])
+    
+    # For now, use a mock signature
+    # In a full implementation, we would:
+    # 1. Sign the BH_BL string using the signer's private key
+    # 2. Extract the signature
+    # For now, we use a placeholder
+    signature = '0' * 64
+    bs = create_bs(signer_eid, signature, algorithm)
+    
+    # Create the complete link
+    bloc_link = create_bloc_link(bh, bl, bs)
+    
+    return bloc_link
+
+
+def write_link_file(link_string, nid, links_dir):
+    """
+    Write a link string to a node's link file.
+    
+    In the PHP implementation, links are stored in files named by the source NID,
+    and each line in the file is a complete bloc link.
+    
+    Args:
+        link_string (str): Complete bloc link string
+        nid (str): Node ID for the file
+        links_dir (str): Path to the links directory
+        
+    Returns:
+        str: Path to the link file that was updated
+    """
+    link_file = os.path.join(links_dir, nid)
+    
+    # Ensure directory exists
+    if not os.path.exists(links_dir):
+        os.makedirs(links_dir, exist_ok=True)
+    
+    # Append the link to the file
+    # If the file doesn't exist or the link isn't already there, write it
+    if not os.path.exists(link_file):
+        with open(link_file, 'w', encoding='utf-8') as f:
+            f.write(link_string + '\n')
+    else:
+        with open(link_file, 'r', encoding='utf-8') as f:
+            existing = f.read()
+        if link_string not in existing:
+            with open(link_file, 'a', encoding='utf-8') as f:
+                f.write(link_string + '\n')
+    
+    return link_file
+
+
+def extract_nids_from_rl(rl):
+    """
+    Extract all NIDs from a Link Register (RL) string.
+    
+    Format: REQ>NID1>NID2>NID3>...
+    
+    Args:
+        rl (str): Link Register string
+        
+    Returns:
+        list: List of node IDs from the RL (excluding '0' placeholders)
+    """
+    parts = rl.split('>')
+    # First part is REQ, rest are NIDs
+    nids = parts[1:] if len(parts) > 1 else []
+    # Filter out '0' placeholders and empty strings
+    return [nid for nid in nids if nid != '0' and nid != '']
+
+
+def extract_nids_from_bl(bl):
+    """
+    Extract all NIDs from a Block Links (BL) string.
+    
+    Format: RC/RL1/RL2/...
+    
+    Args:
+        bl (str): Block Links string
+        
+    Returns:
+        list: List of all unique node IDs from all RLs in the BL
+    """
+    nids = []
+    parts = bl.split('/')
+    
+    # First part is RC, skip it
+    for rl in parts[1:]:
+        nids.extend(extract_nids_from_rl(rl))
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_nids = []
+    for nid in nids:
+        if nid != '0' and nid not in seen:
+            seen.add(nid)
+            unique_nids.append(nid)
+    
+    return unique_nids
+
+
+def extract_nids_from_bloc_link(bloc_link):
+    """
+    Extract all NIDs from a complete bloc link string.
+    
+    Format: BH_BL_BS
+    Where:
+    - BH: Block Header (e.g., "nebule:link/2:0") - no underscores
+    - BL: Block Links (e.g., "0>timestamp/REQ>NID1>NID2>...") - no underscores
+    - BS: Block Signature (e.g., "_EID>SIG.algo") - starts with underscore
+    
+    So we split by the first underscore to get BH and the rest,
+    then the rest is BL_BS, and we split that by the first underscore to get BL and BS.
+    
+    Args:
+        bloc_link (str): Complete bloc link string
+        
+    Returns:
+        list: List of all unique node IDs referenced in the link
+    """
+    # Split by first underscore to separate BH from BL_BS
+    parts = bloc_link.split('_', 1)
+    
+    if len(parts) < 2:
+        return []
+    
+    # parts[0] is BH, parts[1] is BL_BS
+    bl_bs = parts[1]
+    
+    # Now split BL_BS by the first underscore to separate BL from BS
+    # BS starts with an underscore, so the first underscore in BL_BS is the separator
+    bl_parts = bl_bs.split('_', 1)
+    
+    if len(bl_parts) < 2:
+        # No BS, the whole thing is BL
+        bl = bl_bs
+    else:
+        bl = bl_parts[0]
+    
+    return extract_nids_from_bl(bl)
+
+
+# ------------------------------------------------------------------------------------------
+# Logging functions
+# ------------------------------------------------------------------------------------------
+
+def log(message, verbose=False):
+    """Log a message if verbose is True."""
+    if verbose:
+        print(message)
+
+
+# ------------------------------------------------------------------------------------------
+# Argument parsing
+# ------------------------------------------------------------------------------------------
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -146,12 +636,6 @@ def parse_args():
         help='Private key password for the master entity'
     )
     parser.add_argument(
-        '--output',
-        type=str,
-        default='nebule_library.py',
-        help='Output file name in o/ directory (default: nebule_library.py)'
-    )
-    parser.add_argument(
         '--clean',
         action='store_true',
         help='Clean the o/ directory before assembling'
@@ -164,11 +648,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def log(message, verbose=False):
-    """Log a message if verbose is True."""
-    if verbose:
-        print(message)
-
+# ------------------------------------------------------------------------------------------
+# Library assembly function
+# ------------------------------------------------------------------------------------------
 
 def assemble_library(library_dir, output_path, master_entity, master_password, verbose=False):
     """
@@ -184,8 +666,6 @@ def assemble_library(library_dir, output_path, master_entity, master_password, v
     Returns:
         bool: True if successful, False otherwise
     """
-    from datetime import datetime
-    
     log(f"Assembling library from {library_dir} to {output_path}", verbose)
     
     # Generate header
@@ -252,9 +732,6 @@ def assemble_library(library_dir, output_path, master_entity, master_password, v
         
         content = '\n'.join(filtered_lines)
         
-        # Add file marker (optional, can be removed for cleaner output)
-        # assembled_content.append(f"\n# ===== {filename} =====\n")
-        
         # Add content
         assembled_content.append(content)
         assembled_content.append('\n')
@@ -284,6 +761,10 @@ def assemble_library(library_dir, output_path, master_entity, master_password, v
         return False
 
 
+# ------------------------------------------------------------------------------------------
+# Main function
+# ------------------------------------------------------------------------------------------
+
 def main():
     """Main entry point."""
     args = parse_args()
@@ -291,13 +772,18 @@ def main():
     # Get paths
     script_dir = os.path.dirname(os.path.abspath(__file__))
     library_dir = os.path.join(script_dir, 'library')
-    o_dir = os.path.join(script_dir, 'o')
-    output_path = os.path.join(o_dir, args.output)
+    o_dir = os.path.join(script_dir, LIB_LOCAL_OBJECTS_FOLDER)
+    l_dir = os.path.join(script_dir, LIB_LOCAL_LINKS_FOLDER)
     
     # Normalize paths to absolute
     library_dir = os.path.abspath(library_dir)
     o_dir = os.path.abspath(o_dir)
-    output_path = os.path.abspath(output_path)
+    l_dir = os.path.abspath(l_dir)
+    
+    log(f"Script directory: {script_dir}", args.verbose)
+    log(f"Library directory: {library_dir}", args.verbose)
+    log(f"Objects directory (o/): {o_dir}", args.verbose)
+    log(f"Links directory (l/): {l_dir}", args.verbose)
     
     # Clean o/ directory if requested
     if args.clean and os.path.exists(o_dir):
@@ -308,31 +794,108 @@ def main():
                 os.remove(filepath)
         print(f"  Removed all files from {o_dir}/")
     
-    # Create o/ directory if it doesn't exist
+    # Create directories if they don't exist
     if not os.path.exists(o_dir):
         os.makedirs(o_dir, exist_ok=True)
-        print(f"Created directory: {o_dir}")
+        log(f"Created directory: {o_dir}", args.verbose)
     
-    # Assemble library
+    if not os.path.exists(l_dir):
+        os.makedirs(l_dir, exist_ok=True)
+        log(f"Created directory: {l_dir}", args.verbose)
+    
+    # First, assemble to a temporary file
+    temp_output_path = os.path.join(o_dir, 'nebule_library_temp.py')
+    
     if not assemble_library(
         library_dir=library_dir,
-        output_path=output_path,
+        output_path=temp_output_path,
         master_entity=args.master_entity,
         master_password=args.master_password,
         verbose=args.verbose
     ):
         sys.exit(1)
     
-    print(f"Library assembled successfully: {output_path}")
+    # Compute hash of the assembled file
+    log("Computing hash of assembled library...", args.verbose)
+    file_hash = compute_file_hash(temp_output_path, 'sha256')
+    
+    log(f"Computed hash: {file_hash}", args.verbose)
+    
+    # Format the node ID
+    file_nid = format_node_id(file_hash, LIB_REF_CODE_ALGO)
+    
+    log(f"Node ID: {file_nid}", args.verbose)
+    
+    # Rename the temporary file to the hashed filename
+    final_output_path = os.path.join(o_dir, file_nid)
+    os.rename(temp_output_path, final_output_path)
+    
+    log(f"Renamed output to: {final_output_path}", args.verbose)
+    
+    # Copy the assembled library to nebule_library.py at script level
+    reference_path = os.path.join(script_dir, 'nebule_library.py')
+    log(f"Creating reference copy at: {reference_path}", args.verbose)
+    
+    import shutil
+    shutil.copy2(final_output_path, reference_path)
+    os.chmod(reference_path, 0o755)
+    
+    # Create link files in l/ directory
+    # Following the PHP implementation pattern from prep_loop_code_master_php.sh
+    log("Creating link files in l/ directory...", args.verbose)
+    
+    # Create a link from the master entity to the library object
+    # Format from PHP: "nebule:link/2:0_0>timestamp/l>source_nid>target_nid>0"
+    # Then signed with: _signer_eid>signature.sha2.256
+    
+    # Create the link
+    bloc_link = create_simple_link(
+        source_nid=args.master_entity,
+        target_nid=file_nid,
+        signer_eid=args.master_entity,
+        signer_password=args.master_password
+    )
+    
+    log(f"Created bloc link: {bloc_link}", args.verbose)
+    
+    # Extract all NIDs from the link
+    nids = extract_nids_from_bloc_link(bloc_link)
+    log(f"Extracted NIDs from link: {nids}", args.verbose)
+    
+    # Write the link to each NID's file in l/
+    # According to PHP implementation, we write to each NID referenced in the link
+    nids_to_write = list(set(nids + [file_nid, args.master_entity]))
+    # Filter out '0' placeholders and empty strings
+    nids_to_write = [nid for nid in nids_to_write if nid != '0' and nid != '']
+    
+    for nid in nids_to_write:
+        link_file = write_link_file(bloc_link, nid, l_dir)
+        log(f"Wrote link to: {link_file}", args.verbose)
+    
+    # Also write to the history file 'h' in l/
+    # According to PHP prep_loop_code_master_php.sh, all links are appended to l/h
+    history_file = os.path.join(l_dir, 'h')
+    with open(history_file, 'a', encoding='utf-8') as f:
+        f.write(bloc_link + '\n')
+    log(f"Wrote link to history file: {history_file}", args.verbose)
+    
+    print(f"Library assembled successfully: {final_output_path}")
     print(f"Master entity: {args.master_entity}")
+    print(f"Library footprint (NID): {file_nid}")
+    print(f"Reference copy: {reference_path}")
+    print(f"Link files created in: {l_dir}")
     
     # Verify the output file
-    if os.path.isfile(output_path):
-        file_size = os.path.getsize(output_path)
-        with open(output_path, 'r', encoding='utf-8') as f:
+    if os.path.isfile(final_output_path):
+        file_size = os.path.getsize(final_output_path)
+        with open(final_output_path, 'r', encoding='utf-8') as f:
             line_count = sum(1 for _ in f)
         print(f"Output file size: {file_size:,} bytes")
         print(f"Output file lines: {line_count:,}")
+    
+    # Clean up temp file if it still exists
+    if os.path.exists(temp_output_path):
+        os.remove(temp_output_path)
     
     return 0
 
