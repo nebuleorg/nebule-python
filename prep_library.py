@@ -928,14 +928,7 @@ def main():
     for nid in nids_to_write:
         link_file = write_link_file(bloc_link, nid, l_dir)
         log(f"Wrote link to: {link_file}", args.verbose)
-    
-    # Also write to the history file 'h' in l/
-    # According to PHP prep_loop_code_master_php.sh, all links are appended to l/h
-    history_file = os.path.join(l_dir, 'h')
-    with open(history_file, 'a', encoding='utf-8') as f:
-        f.write(bloc_link + '\n')
-    log(f"Wrote link to history file: {history_file}", args.verbose)
-    
+
     print(f"Library assembled successfully: {final_output_path}")
     print(f"Master entity: {args.master_entity}")
     print(f"Library footprint (NID): {file_nid}")
