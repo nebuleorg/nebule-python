@@ -1,23 +1,36 @@
 #!/usr/bin/env python3
 """
 Sign master entities script for nebule.
-Version: 020261025
+Version: 020261028
 
-Generates and signs the bloc links that declare and recognize master entities:
-- Each entity (including the puppetmaster) self-declares its own links:
-  PEM public key type, PEM private key type, private key ownership (fork),
-  name, location and algorithm. Those links are signed by the entity itself.
-- The puppetmaster generates the recognition links that declare which entity
-  is master (authority) of what. Those links are signed by the puppetmaster.
+Signs the bloc links that recognize master entities. Entities are created and
+self-declared with create_entity.py: this script neither generates entities
+nor objects, it only generates the recognition links signed by the
+puppetmaster that declare which entity is master (authority) of what:
+
+    l>RID_TYPE>eid>RID_TYPE            global authority of type TYPE
+
+with TYPE in: security, code, time, directory.
+
+Each entity designated by EID (puppetmaster and masters) must already be
+present in the o/ folder of the target space: its public key object is read
+from o/, and its consistency and its links are verified with the functions of
+verify_entity.py. Only structurally valid links signed by the entity, with a
+verified signature, are taken into account. Each entity can also be verified
+standalone with:
+
+    python3 verify_entity.py --entity <eid> --space <space>
+
+The puppetmaster private key is not given as a file: it is looked up from the
+puppetmaster self-declaration links (private key ownership fork), exactly as
+verify_entity.py does, and loaded with the password. The password is always
+required: either with --puppetmaster-password, or it is asked interactively
+by the script when the argument is absent.
 
 The signature is computed on the BH_BL content (see 502_link_register.php:
 "la signature SIG calculée sur le contenu du bloc BH_BL") with RSA PKCS#1 v1.5
 over sha2.256 (or sha2.512 for keys of 4096 bits and more), matching
 prep_loop_code_master_php.sh sign_write_link() and lib_nebule/202_crypto_openssl.php.
-
-Entity key objects (public and private) must already be present in the o/
-folder of the target space: they are verified, not created. Name and
-location string objects are created in o/ if absent, as the PHP prep does.
 
 Links are written directly into the l/ folder: one line per NID referenced
 by the link register, plus one line in the l/h history file.
@@ -25,55 +38,50 @@ by the link register, plus one line in the l/h history file.
 Usage:
     python3 sign_master_entities.py \
         --space <space_folder> \
-        --date 0YYYYMMDDHHMMSS \
-        --puppetmaster-key <puppetmaster_private_key.pem> \
-        --puppetmaster-password <password> \
-        [--puppetmaster-name <name>] \
-        [--puppetmaster-location <url>] \
-        [--entity pub=<pub.pem>,priv=<priv.pem>,password=<pw>,name=<name>,location=<url>,algorithm=rsa.2048] \
-        [--master <pub.pem|eid>,security,code,time,directory,local] \
+        --puppetmaster <eid> \
+        [--puppetmaster-password <password>] \
+        [--date 0YYYYMMDDHHMMSS] \
+        [--master <eid>,<type>[,<type>...]] \
         [--verbose]
 
 Options:
     --space                  Root folder containing the o/ and l/ folders. Default: '.'
     --date                   Signature date, format 0YYYYMMDDHHMMSS (antidated).
                              Default: current time in the same format.
-    --puppetmaster-key       Puppetmaster private key (PEM, possibly encrypted). Required.
-    --puppetmaster-password  Puppetmaster private key password. Required.
-    --puppetmaster-name      Puppetmaster name (optional).
-    --puppetmaster-location  Puppetmaster location URL (optional).
-    --entity                 Entity specification, repeatable, comma separated key=value
-                             pairs. Only 'pub' is mandatory; 'priv' and 'password' are
-                             required for self-declaration links:
-                             pub=<pub.pem>,priv=<priv.pem>,password=<pw>,name=<name>,
-                             location=<url>,algorithm=rsa.2048
-    --master                 Master role declaration, repeatable, comma separated parts:
-                             <entity_pub_key_path_or_eid>,<type>[,<type>...]
-                             where type is one of: security, code, time, directory, local.
+    --puppetmaster           Puppetmaster entity ID (NID of its public key,
+                             present in o/). Required.
+    --puppetmaster-password  Password of the puppetmaster private key. When
+                             absent, the script asks for it interactively.
+    --master                 Master role declaration, repeatable, comma
+                             separated parts: <eid>,<type>[,<type>...] where
+                             type is one of: security, code, time, directory.
                              The recognition links are signed by the puppetmaster.
     --verbose                Show verbose output.
 """
 
 import argparse
-import hashlib
+import getpass
 import os
 import re
 import sys
 from datetime import datetime
 
 try:
-    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 except ImportError:
     print("Error: The 'cryptography' library is required: pip install cryptography", file=sys.stderr)
     sys.exit(1)
 
+try:
+    import verify_entity
+except ImportError:
+    print("Error: The 'verify_entity.py' script must be present in the same folder", file=sys.stderr)
+    sys.exit(1)
+
 # ------------------------------------------------------------------------------------------
 # Constants for nebule
 # ------------------------------------------------------------------------------------------
-
-# Reference code algorithm
-LIB_REF_CODE_ALGO = 'sha2.256'
 
 # Local storage configuration
 LIB_LOCAL_LINKS_FOLDER = 'l'
@@ -81,6 +89,9 @@ LIB_LOCAL_OBJECTS_FOLDER = 'o'
 
 # Link version
 LIB_LINK_VERSION = '2:0'
+
+# Node ID format (see AGENTS.md: <hash>.<algo>[.<size>], no underscore)
+NID_REGEX = r'[0-9a-f]+\.[0-9a-z]+(?:\.\d+)?'
 
 # Master (authority) types and their reference RID (from bootstrap.php)
 RID_SECURITY_AUTHORITY = 'a4b210d4fb820a5b715509e501e36873eb9e27dca1dd591a98a5fc264fd2238adf4b489d.none.288'
@@ -94,117 +105,11 @@ MASTER_GLOBAL_TYPES = {
     'time': RID_TIME_AUTHORITY,
     'directory': RID_DIRECTORY_AUTHORITY,
 }
-MASTER_LOCAL_TYPE = 'local'
-
-# Reference strings whose sha2.256 hash is used as OID/RID in links
-# (see prep_loop_code_master_php.sh)
-REF_PEM_TYPE = 'application/x-pem-file'
-REF_OBJ_TYPE = 'nebule/objet/type'
-REF_OBJ_NAME = 'nebule/objet/nom'
-REF_OBJ_ENTITY_LOCATION = 'nebule/objet/entite/localisation'
-REF_OBJ_ENTITY_LOCAL_AUTHORITY = 'nebule/objet/entite/autorite/locale'
-REF_OBJ_ENTITY_PRIVATE = 'nebule/objet/entite/prive'
-REF_OBJ_ENTITY_ALGORITHM = 'nebule/objet/entite/algorithme'
-
-
-# ------------------------------------------------------------------------------------------
-# Hash and node ID functions
-# ------------------------------------------------------------------------------------------
-
-def compute_content_hash(content, algorithm='sha256'):
-    """
-    Compute the cryptographic hash of content bytes.
-
-    The content MUST be bytes and is NOT modified before hash computation.
-
-    Args:
-        content (bytes): Raw bytes content to hash
-        algorithm (str): Hash algorithm to use (default: 'sha256')
-
-    Returns:
-        str: Hexadecimal hash digest of the content
-    """
-    if not isinstance(content, bytes):
-        raise TypeError(f"content must be bytes, got {type(content).__name__}")
-    hash_obj = hashlib.new(algorithm)
-    hash_obj.update(content)
-    return hash_obj.hexdigest()
-
-
-def format_node_id(hash_value, algorithm=LIB_REF_CODE_ALGO):
-    """
-    Format a node ID (NID) according to nebule naming convention.
-
-    Args:
-        hash_value (str): The hash digest (hexadecimal, lowercase)
-        algorithm (str): The hash algorithm (e.g. 'sha2.256')
-
-    Returns:
-        str: Formatted node ID: <hash>.<algorithm>
-    """
-    return f"{hash_value}.{algorithm}"
-
-
-def ref_node_id(reference):
-    """
-    Compute the node ID of a reference string.
-
-    The reference strings are hashed with sha2.256, exactly as done in
-    prep_loop_code_master_php.sh:
-        echo -n 'nebule/objet/type' | sha256sum
-
-    Args:
-        reference (str): The reference string
-
-    Returns:
-        str: Formatted node ID of the reference
-    """
-    return format_node_id(compute_content_hash(reference.encode('utf-8')))
 
 
 # ------------------------------------------------------------------------------------------
 # Key and signature functions
 # ------------------------------------------------------------------------------------------
-
-def load_private_key(content, password):
-    """
-    Load a private key from PEM content.
-
-    Args:
-        content (bytes): Private key PEM content
-        password (str): Private key password ('' if not encrypted)
-
-    Returns:
-        The private key object
-
-    Raises:
-        ValueError: If the key cannot be loaded
-    """
-    pwd = password.encode('utf-8') if password != '' else None
-    try:
-        return serialization.load_pem_private_key(content, password=pwd)
-    except Exception as e:
-        raise ValueError(f"Unable to load private key: {e}")
-
-
-def derive_public_key_pem(private_key):
-    """
-    Derive the public key PEM from a private key.
-
-    Matches: openssl rsa -in <key> -pubout
-    (SubjectPublicKeyInfo, no trailing newline after bash $() stripping)
-
-    Args:
-        private_key: The private key object
-
-    Returns:
-        bytes: Public key PEM content
-    """
-    return private_key.public_key().public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo,
-    )
-
 
 def get_key_bits(key_object):
     """
@@ -402,295 +307,292 @@ def write_signed_link(bloc_link, links_dir, verbose=False):
 
 
 # ------------------------------------------------------------------------------------------
-# Objects verification functions
+# Entity verification functions (reuse of verify_entity.py)
 # ------------------------------------------------------------------------------------------
 
-def canonical_contents(content):
+def validate_eid(eid):
     """
-    Return the candidate canonical contents of a key file.
-
-    The PHP prep stores key objects without trailing newline
-    (echo -n "${key}" after bash $() stripping). Both the raw content and the
-    content stripped of trailing newlines are candidates.
+    Validate an entity ID (NID of its public key).
 
     Args:
-        content (bytes): Raw file content
+        eid (str): The entity ID
 
     Returns:
-        list: Candidate contents, most canonical first
+        str: The entity ID
+
+    Raises:
+        ValueError: If the entity ID format is invalid
     """
-    stripped = content.rstrip(b'\n')
-    if stripped == content:
-        return [content]
-    return [stripped, content]
+    if not re.fullmatch(NID_REGEX, eid):
+        raise ValueError(f"Invalid entity ID: {eid}")
+    return eid
 
 
-def find_object(content, objects_dir, label, verbose=False):
+def load_entity_public_key(eid, objects_dir):
     """
-    Verify that a key object is present in the o/ folder and return its NID.
+    Read and load the entity public key object from the o/ folder.
 
-    The object must be named by the sha2.256 hash of its content, and its
-    content must hash back to its name (integrity check).
+    The object must be present and intact: its content must hash back to its
+    name, as verify_entity.py checks.
 
     Args:
-        content (bytes): Raw key file content
+        eid (str): The entity ID (NID of its public key)
         objects_dir (str): Path to the objects directory
-        label (str): Label for error messages
+
+    Returns:
+        tuple: (pub_content, pub_key) of the entity
+
+    Raises:
+        ValueError: If the object is absent, corrupted or not a public key
+    """
+    pub_content, pub_err = verify_entity.read_object(objects_dir, eid, 'public key')
+    if pub_err != '':
+        raise ValueError(pub_err)
+    try:
+        pub_key = verify_entity.load_public_key(pub_content)
+    except ValueError as e:
+        raise ValueError(f"entity {eid} public key object is not a valid public key PEM ({e})")
+    return pub_content, pub_key
+
+
+def collect_valid_entity_links(eid, pub_key, links_dir, verbose=False):
+    """
+    Collect the links signed by the entity, verifying the entity signatures.
+
+    Reuses the parsing and signature verification functions of
+    verify_entity.py: only structurally valid links signed by the entity,
+    with a verified signature, are taken into account.
+
+    Args:
+        eid (str): The entity ID
+        pub_key: The entity public key object
+        links_dir (str): Path to the links directory
         verbose (bool): Show verbose output
 
     Returns:
-        tuple: (nid, canonical_content) of the found object
-
-    Raises:
-        SystemExit: If the object is absent or corrupted
+        dict: 'total' (links in the space), 'signed' (links signed by the
+            entity), 'valid' (of them, the ones with a verified entity
+            signature), 'sigs_total', 'sigs_ok', 'links' (the valid parsed
+            links)
     """
-    for candidate in canonical_contents(content):
-        nid = format_node_id(compute_content_hash(candidate))
-        object_path = os.path.join(objects_dir, nid)
-        if os.path.isfile(object_path):
-            with open(object_path, 'rb') as f:
-                stored = f.read()
-            if canonical_contents(stored)[0] != candidate:
-                print(f"Error: Object {label} ({nid}) content mismatch in o/", file=sys.stderr)
-                sys.exit(1)
+    all_links = verify_entity.read_links(links_dir)
+    entity_links = []
+    for link in all_links:
+        parsed, err = verify_entity.parse_bloc_link(link)
+        if parsed is None:
             if verbose:
-                print(f"  o/{nid} ({label})")
-            return nid, candidate
-    expected = ', '.join(
-        format_node_id(compute_content_hash(candidate))
-        for candidate in canonical_contents(content)
-    )
-    print(f"Error: Object for {label} not found in o/ folder: {objects_dir}", file=sys.stderr)
-    print(f"       Expected object name(s): {expected}", file=sys.stderr)
-    sys.exit(1)
+                print(f"  unparseable link: {err}")
+            continue
+        if any(s['eid'] == eid for s in parsed['signers']):
+            entity_links.append((link, parsed))
+    valid_links = []
+    sigs_total = 0
+    sigs_ok = 0
+    for link, parsed in entity_links:
+        bh_bl = '_'.join(link.split('_')[:2])
+        link_ok = True
+        for signer in parsed['signers']:
+            if signer['eid'] != eid:
+                continue
+            sigs_total += 1
+            if verify_entity.verify_signature(bh_bl, signer['sig'], signer['size'], pub_key):
+                sigs_ok += 1
+            else:
+                link_ok = False
+                if verbose:
+                    print(f"  invalid entity signature on link "
+                          f"{parsed['req']}>{'>'.join(parsed['nids'])}")
+        if link_ok:
+            valid_links.append(parsed)
+    return {
+        'total': len(all_links),
+        'signed': len(entity_links),
+        'valid': len(valid_links),
+        'sigs_total': sigs_total,
+        'sigs_ok': sigs_ok,
+        'links': valid_links,
+    }
 
 
-def write_object(content, objects_dir, verbose=False):
+def check_entity_consistency(eid, stats, verbose=False):
     """
-    Write a string object into the o/ folder if absent, and return its NID.
+    Check the entity self-declaration consistency from its valid links.
 
-    Used for name and location objects, as the PHP prep does:
-        echo -n 'puppetmaster' > "${SPACE}/o/${entityNameOID}"
+    Follows the verify_entity.py final status, minus the key pair check that
+    needs the entity private key password: the public key must be declared as
+    a PEM file, the key algorithm must be declared, and all the links signed
+    by the entity must have a verified signature.
 
     Args:
-        content (str): Object content string
+        eid (str): The entity ID
+        stats (dict): The result of collect_valid_entity_links()
+        verbose (bool): Show verbose output
+
+    Returns:
+        tuple: (problems, declarations, algorithm) with problems as a list of
+            error strings, declarations as the verify_entity.py
+            find_declarations() result, algorithm as the declared key
+            algorithm ('' when absent)
+    """
+    declarations = verify_entity.find_declarations(stats['links'], eid)
+    algorithm = ''
+    for size in verify_entity.RSA_KEY_SIZES:
+        if verify_entity.ref_node_id(f"rsa.{size}") in declarations['algorithm']:
+            algorithm = f"rsa.{size}"
+            break
+    problems = []
+    if stats['signed'] == 0:
+        problems.append('no link signed by the entity in l/')
+    elif stats['valid'] != stats['signed']:
+        problems.append(
+            f"{stats['signed'] - stats['valid']} link(s) signed by the entity "
+            f"have an invalid signature")
+    if not declarations['pub_pem']:
+        problems.append('public key not declared as a PEM file by a valid signed link')
+    if algorithm == '':
+        problems.append('key algorithm not declared by a valid signed link')
+    if verbose:
+        print(f"  links: {stats['total']} in l/, {stats['signed']} signed by the entity, "
+              f"{stats['valid']} valid ({stats['sigs_ok']}/{stats['sigs_total']} signatures valid)")
+    return problems, declarations, algorithm
+
+
+def find_private_key(eid, pub_content, password, declarations, objects_dir, verbose=False):
+    """
+    Look up the entity private key from its self-declaration links.
+
+    The private key ownership fork (f>eid>privNID>priveRID) gives the private
+    key objects, which must also be declared as PEM files, exactly as
+    verify_entity.py does. The retained key loads with the password and
+    derives the entity public key.
+
+    Args:
+        eid (str): The entity ID
+        pub_content (bytes): The entity public key object content
+        password (str): The private key password
+        declarations (dict): The verify_entity.py find_declarations() result
         objects_dir (str): Path to the objects directory
         verbose (bool): Show verbose output
 
     Returns:
-        str: The object NID
-    """
-    content_bytes = content.encode('utf-8')
-    nid = format_node_id(compute_content_hash(content_bytes))
-    object_path = os.path.join(objects_dir, nid)
-    if not os.path.isfile(object_path):
-        with open(object_path, 'wb') as f:
-            f.write(content_bytes)
-        if verbose:
-            print(f"  o/{nid} (created)")
-    return nid
-
-
-# ------------------------------------------------------------------------------------------
-# Entity functions
-# ------------------------------------------------------------------------------------------
-
-class Entity:
-    """An entity with its keys and self-declaration attributes."""
-
-    def __init__(self, pub_content, priv_content, password,
-                 name='', location='', algorithm=''):
-        self.pub_content = pub_content
-        self.priv_content = priv_content
-        self.password = password
-        self.name = name
-        self.location = location
-        self.algorithm = algorithm
-        self.private_key = None
-        self.pub_nid = ''
-        self.priv_nid = ''
-        self.bits = 0
-        self.hash_size = 256
-
-    def load(self, objects_dir, verbose=False):
-        """Load keys, verify o/ objects presence and compute NIDs."""
-        self.priv_nid, self.priv_content = find_object(
-            self.priv_content, objects_dir, 'private key', verbose)
-        self.pub_nid, self.pub_content = find_object(
-            self.pub_content, objects_dir, 'public key', verbose)
-        self.private_key = load_private_key(self.priv_content, self.password)
-        self.bits = get_key_bits(self.private_key)
-        self.hash_size = get_signature_hash_size(self.private_key)
-        # Default algorithm derived from the key size
-        if self.algorithm == '':
-            self.algorithm = f"rsa.{self.bits}"
-
-    def get_eid(self):
-        """Return the entity ID (NID of its public key)."""
-        return self.pub_nid
-
-
-def load_puppetmaster(key_path, password, name, location, objects_dir, verbose=False):
-    """
-    Load the puppetmaster entity from its private key.
-
-    The public key is derived from the private key, as the PHP prep does:
-        openssl rsa -in <key> -pubout
-
-    Args:
-        key_path (str): Path to the puppetmaster private key PEM file
-        password (str): Private key password
-        name (str): Puppetmaster name (may be empty)
-        location (str): Puppetmaster location (may be empty)
-        objects_dir (str): Path to the objects directory
-        verbose (bool): Show verbose output
-
-    Returns:
-        Entity: The puppetmaster entity
-    """
-    with open(key_path, 'rb') as f:
-        priv_content = f.read()
-    private_key = load_private_key(priv_content, password)
-    pub_content = derive_public_key_pem(private_key)
-    entity = Entity(pub_content, priv_content, password, name, location)
-    entity.load(objects_dir, verbose)
-    return entity
-
-
-def parse_entity_spec(spec):
-    """
-    Parse an --entity specification.
-
-    Format: comma separated key=value pairs. Only 'pub' is positional-mandatory;
-    'priv' and 'password' are required for the self-declaration links.
-
-    Args:
-        spec (str): The entity specification string
-
-    Returns:
-        dict: The entity attributes
+        tuple: (private_key, priv_nid) of the found private key
 
     Raises:
-        ValueError: If the specification is invalid
+        ValueError: If no private key object matches the entity
     """
-    attributes = {
-        'pub': '',
-        'priv': '',
-        'password': '',
-        'name': '',
-        'location': '',
-        'algorithm': '',
-    }
-    for part in spec.split(','):
-        part = part.strip()
-        if part == '':
+    candidates = declarations['fork'] & declarations['priv_pem']
+    for candidate in sorted(candidates):
+        priv_content, priv_err = verify_entity.read_object(
+            objects_dir, candidate, 'private key')
+        if priv_err != '':
+            if verbose:
+                print(f"  private key {candidate}: {priv_err}")
             continue
-        if '=' not in part:
-            raise ValueError(f"Invalid entity attribute (expected key=value): {part}")
-        key, value = part.split('=', 1)
-        if key not in attributes:
-            raise ValueError(f"Unknown entity attribute: {key}")
-        attributes[key] = value
-    if attributes['pub'] == '':
-        raise ValueError(f"Missing mandatory 'pub' attribute in entity spec: {spec}")
-    if attributes['priv'] == '':
-        raise ValueError(f"Missing mandatory 'priv' attribute in entity spec: {spec}")
-    return attributes
+        try:
+            private_key = verify_entity.load_private_key(priv_content, password)
+        except ValueError:
+            if verbose:
+                print(f"  private key {candidate}: does not load with the given password")
+            continue
+        derived = verify_entity.derive_public_key_pem(private_key)
+        if verify_entity.canonical_contents(derived)[0] \
+                == verify_entity.canonical_contents(pub_content)[0]:
+            return private_key, candidate
+        if verbose:
+            print(f"  private key {candidate}: does not match the entity public key")
+    if not candidates:
+        raise ValueError(
+            f"entity {eid} private key not declared by valid signed links "
+            '(ownership or PEM declaration missing)')
+    raise ValueError(
+        f"entity {eid} private key not found: no private key object matches "
+        'the entity public key with the given password')
 
 
-def load_entities(entity_specs, objects_dir, verbose=False):
+def verify_master_entity(eid, objects_dir, links_dir, verbose=False):
     """
-    Load all entities from their specifications.
+    Verify a master entity designated by EID.
+
+    The entity public key object must be present in the o/ folder, and the
+    entity consistency and its links are verified with the functions of
+    verify_entity.py. The key pair is not checked: the entity private key
+    password is not given for master entities.
 
     Args:
-        entity_specs (list): List of --entity specification strings
+        eid (str): The entity ID
         objects_dir (str): Path to the objects directory
+        links_dir (str): Path to the links directory
+        verbose (bool): Show verbose output
+
+    Raises:
+        ValueError: If the entity is absent or inconsistent
+    """
+    pub_content, pub_key = load_entity_public_key(eid, objects_dir)
+    stats = collect_valid_entity_links(eid, pub_key, links_dir, verbose)
+    problems, _, _ = check_entity_consistency(eid, stats, verbose)
+    if problems:
+        raise ValueError(
+            f"inconsistent master entity {eid}: {'; '.join(problems)}")
+
+
+# ------------------------------------------------------------------------------------------
+# Puppetmaster functions
+# ------------------------------------------------------------------------------------------
+
+class Puppetmaster:
+    """The puppetmaster entity: its EID, its public key and its private key."""
+
+    def __init__(self, eid, pub_content, pub_key, private_key, priv_nid):
+        self.eid = eid
+        self.pub_content = pub_content
+        self.pub_key = pub_key
+        self.private_key = private_key
+        self.priv_nid = priv_nid
+        self.bits = get_key_bits(private_key)
+        self.hash_size = get_signature_hash_size(private_key)
+
+
+def load_puppetmaster(eid, password, objects_dir, links_dir, verbose=False):
+    """
+    Load the puppetmaster entity from its EID.
+
+    The public key object is read from the o/ folder, the entity consistency
+    and its links are verified with the functions of verify_entity.py, and
+    the private key is looked up from the self-declaration links.
+
+    Args:
+        eid (str): The puppetmaster entity ID
+        password (str): The private key password
+        objects_dir (str): Path to the objects directory
+        links_dir (str): Path to the links directory
         verbose (bool): Show verbose output
 
     Returns:
-        list: List of loaded Entity objects
+        Puppetmaster: The puppetmaster entity
+
+    Raises:
+        ValueError: If the entity is absent, inconsistent or its private key
+            cannot be found
     """
-    entities = []
-    for spec in entity_specs:
-        attributes = parse_entity_spec(spec)
-        with open(attributes['pub'], 'rb') as f:
-            pub_content = f.read()
-        with open(attributes['priv'], 'rb') as f:
-            priv_content = f.read()
-        entity = Entity(
-            pub_content,
-            priv_content,
-            attributes['password'],
-            attributes['name'],
-            attributes['location'],
-            attributes['algorithm'],
-        )
-        entity.load(objects_dir, verbose)
-        entities.append(entity)
-    return entities
+    pub_content, pub_key = load_entity_public_key(eid, objects_dir)
+    stats = collect_valid_entity_links(eid, pub_key, links_dir, verbose)
+    problems, declarations, algorithm = check_entity_consistency(eid, stats, verbose)
+    if problems:
+        raise ValueError(
+            f'inconsistent puppetmaster entity {eid}: {"; ".join(problems)}')
+    private_key, priv_nid = find_private_key(
+        eid, pub_content, password, declarations, objects_dir, verbose)
+    if verbose:
+        print(f"  private key: {priv_nid}")
+        print(f"  algorithm: {algorithm}")
+    return Puppetmaster(eid, pub_content, pub_key, private_key, priv_nid)
 
 
 # ------------------------------------------------------------------------------------------
 # Link generation functions
 # ------------------------------------------------------------------------------------------
 
-def generate_self_declaration_links(entity, date, objects_dir, links_dir, verbose=False):
-    """
-    Generate and write the self-declaration links of an entity.
-
-    Each entity is responsible and owner of the links that concern it, so
-    those links are signed by the entity itself. Matches the links list of
-    prep_loop_code_master_php.sh:
-
-        l>pubE>pemOID>typeRID            public key is a PEM file (default)
-        l>privE<pemOID>typeRID           private key is a PEM file
-        f>pubE>privE>PkeyRID             private key ownership
-        l>pubE>nameOID>nameRID           name (if given)
-        l>pubE>localOID>localRID         location (if given)
-        l>pubE>rsaOID>algoRID            key algorithm
-
-    Args:
-        entity (Entity): The entity that self-declares and signs
-        date (str): Chronology in format 0YYYYMMDDHHMMSS
-        objects_dir (str): Path to the objects directory
-        links_dir (str): Path to the links directory
-        verbose (bool): Show verbose output
-
-    Returns:
-        int: Number of links written
-    """
-    eid = entity.get_eid()
-    pem_oid = ref_node_id(REF_PEM_TYPE)
-    type_rid = ref_node_id(REF_OBJ_TYPE)
-    name_rid = ref_node_id(REF_OBJ_NAME)
-    local_rid = ref_node_id(REF_OBJ_ENTITY_LOCATION)
-    private_rid = ref_node_id(REF_OBJ_ENTITY_PRIVATE)
-    algo_rid = ref_node_id(REF_OBJ_ENTITY_ALGORITHM)
-
-    unsigned_links = [
-        create_bh_bl(date, 'l', [eid, pem_oid, type_rid]),
-        create_bh_bl(date, 'l', [entity.priv_nid, pem_oid, type_rid]),
-        create_bh_bl(date, 'f', [eid, entity.priv_nid, private_rid]),
-    ]
-    if entity.name != '':
-        name_oid = write_object(entity.name, objects_dir, verbose)
-        unsigned_links.append(create_bh_bl(date, 'l', [eid, name_oid, name_rid]))
-    if entity.location != '':
-        local_oid = write_object(entity.location, objects_dir, verbose)
-        unsigned_links.append(create_bh_bl(date, 'l', [eid, local_oid, local_rid]))
-    if entity.algorithm != '':
-        algo_oid = ref_node_id(entity.algorithm)
-        unsigned_links.append(create_bh_bl(date, 'l', [eid, algo_oid, algo_rid]))
-
-    count = 0
-    for bh_bl in unsigned_links:
-        bloc_link = sign_link(bh_bl, eid, entity.private_key, entity.hash_size)
-        write_signed_link(bloc_link, links_dir, verbose)
-        count += 1
-    return count
-
-
-def generate_recognition_links(entity, types, puppetmaster, date, links_dir, verbose=False):
+def generate_recognition_links(eid, types, puppetmaster, date, links_dir, verbose=False):
     """
     Generate and write the recognition links that declare an entity as master.
 
@@ -700,14 +602,10 @@ def generate_recognition_links(entity, types, puppetmaster, date, links_dir, ver
 
         l>RID_TYPE>eid>RID_TYPE           global authority of type TYPE
 
-    and the local authority link:
-
-        f>lauthOID>eid>                   local authority
-
     Args:
-        entity (Entity): The entity recognized as master
-        types (list): List of master types (security, code, time, directory, local)
-        puppetmaster (Entity): The puppetmaster entity that signs
+        eid (str): The entity recognized as master
+        types (list): List of master types (security, code, time, directory)
+        puppetmaster (Puppetmaster): The puppetmaster entity that signs
         date (str): Chronology in format 0YYYYMMDDHHMMSS
         links_dir (str): Path to the links directory
         verbose (bool): Show verbose output
@@ -718,26 +616,20 @@ def generate_recognition_links(entity, types, puppetmaster, date, links_dir, ver
     Raises:
         ValueError: If a type is unknown
     """
-    eid = entity.get_eid()
-    lauth_oid = ref_node_id(REF_OBJ_ENTITY_LOCAL_AUTHORITY)
-
     unsigned_links = []
     for master_type in types:
-        if master_type == MASTER_LOCAL_TYPE:
-            unsigned_links.append(create_bh_bl(date, 'f', [lauth_oid, eid]))
-        elif master_type in MASTER_GLOBAL_TYPES:
-            rid = MASTER_GLOBAL_TYPES[master_type]
-            unsigned_links.append(create_bh_bl(date, 'l', [rid, eid, rid]))
-        else:
+        if master_type not in MASTER_GLOBAL_TYPES:
             raise ValueError(
                 f"Unknown master type: {master_type} "
-                f"(expected one of: {', '.join(list(MASTER_GLOBAL_TYPES) + [MASTER_LOCAL_TYPE])})"
+                f"(expected one of: {', '.join(MASTER_GLOBAL_TYPES)})"
             )
+        rid = MASTER_GLOBAL_TYPES[master_type]
+        unsigned_links.append(create_bh_bl(date, 'l', [rid, eid, rid]))
 
     count = 0
     for bh_bl in unsigned_links:
         bloc_link = sign_link(
-            bh_bl, puppetmaster.get_eid(), puppetmaster.private_key, puppetmaster.hash_size)
+            bh_bl, puppetmaster.eid, puppetmaster.private_key, puppetmaster.hash_size)
         write_signed_link(bloc_link, links_dir, verbose)
         count += 1
     return count
@@ -750,7 +642,8 @@ def generate_recognition_links(entity, types, puppetmaster, date, links_dir, ver
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description='Generate and sign nebule master entity declaration and recognition links'
+        description='Sign the nebule links that recognize master entities, '
+                    'with the puppetmaster entity'
     )
     parser.add_argument(
         '--space',
@@ -765,37 +658,18 @@ def parse_args():
         help="Signature date in format 0YYYYMMDDHHMMSS (antidated). Default: current time"
     )
     parser.add_argument(
-        '--puppetmaster-key',
+        '--puppetmaster',
         type=str,
         required=True,
-        help='Path to the puppetmaster private key (PEM)'
+        help='Puppetmaster entity ID (NID of its public key, present in o/). '
+             'The private key is looked up from its links'
     )
     parser.add_argument(
         '--puppetmaster-password',
         type=str,
-        required=True,
-        help='Password of the puppetmaster private key'
-    )
-    parser.add_argument(
-        '--puppetmaster-name',
-        type=str,
-        default='',
-        help='Puppetmaster name (optional)'
-    )
-    parser.add_argument(
-        '--puppetmaster-location',
-        type=str,
-        default='',
-        help='Puppetmaster location URL (optional)'
-    )
-    parser.add_argument(
-        '--entity',
-        type=str,
-        action='append',
-        default=[],
-        dest='entities',
-        help='Entity spec: pub=<pub.pem>,priv=<priv.pem>,password=<pw>,'
-             'name=<name>,location=<url>,algorithm=rsa.2048 (repeatable)'
+        default=None,
+        help='Password of the puppetmaster private key. When absent, the script '
+             'asks for it interactively'
     )
     parser.add_argument(
         '--master',
@@ -803,8 +677,8 @@ def parse_args():
         action='append',
         default=[],
         dest='masters',
-        help='Master role: <pub_key_path_or_eid>,<type>[,<type>...] with type in '
-             'security, code, time, directory, local (repeatable, signed by puppetmaster)'
+        help='Master role: <eid>,<type>[,<type>...] with type in '
+             'security, code, time, directory (repeatable, signed by puppetmaster)'
     )
     parser.add_argument(
         '--verbose',
@@ -837,43 +711,57 @@ def validate_date(date):
     return True
 
 
-def resolve_master_entities(master_specs, entities_by_pub_path, entities_by_eid):
+def resolve_password(argument):
     """
-    Resolve --master specifications to (entity, types) pairs.
+    Resolve the puppetmaster private key password.
 
-    The first comma separated part is either the public key file path of a
-    declared entity, or a known entity EID. The following parts are the
-    master types.
+    The password is always required: it comes either from the
+    --puppetmaster-password argument, or from an interactive question of the
+    script.
+
+    Args:
+        argument (str): The --puppetmaster-password argument value, None when
+            absent
+
+    Returns:
+        str: The password (possibly '')
+    """
+    if argument is not None:
+        return argument
+    return getpass.getpass('Puppetmaster private key password: ')
+
+
+def parse_master_specs(master_specs):
+    """
+    Parse the --master specifications.
+
+    Each specification is comma separated: the entity EID, then one or more
+    master types. Each EID must be present in the o/ folder.
 
     Args:
         master_specs (list): List of --master specification strings
-        entities_by_pub_path (dict): Entities indexed by public key file path
-        entities_by_eid (dict): Entities indexed by EID (including puppetmaster)
 
     Returns:
-        list: List of (Entity, [types]) tuples
+        list: List of (eid, [types]) tuples
 
     Raises:
-        ValueError: If a specification is invalid or unresolvable
+        ValueError: If a specification is invalid
     """
-    resolved = []
+    masters = []
     for spec in master_specs:
-        parts = [p.strip() for p in spec.split(',')]
+        parts = [p.strip() for p in spec.split(',') if p.strip() != '']
         if len(parts) < 2:
-            raise ValueError(f"Invalid master spec (need entity and at least one type): {spec}")
-        entity_ref, types = parts[0], parts[1:]
-        if entity_ref in entities_by_eid:
-            entity = entities_by_eid[entity_ref]
-        else:
-            key_path = os.path.abspath(entity_ref)
-            if key_path not in entities_by_pub_path:
+            raise ValueError(
+                f"Invalid master spec (need entity EID and at least one type): {spec}")
+        eid, types = parts[0], parts[1:]
+        validate_eid(eid)
+        for master_type in types:
+            if master_type not in MASTER_GLOBAL_TYPES:
                 raise ValueError(
-                    f"Master spec entity not found: {entity_ref} "
-                    f"(not a known entity public key path nor EID)"
-                )
-            entity = entities_by_pub_path[key_path]
-        resolved.append((entity, types))
-    return resolved
+                    f"Unknown master type: {master_type} "
+                    f"(expected one of: {', '.join(MASTER_GLOBAL_TYPES)})")
+        masters.append((eid, types))
+    return masters
 
 
 def main():
@@ -901,59 +789,53 @@ def main():
         sys.exit(1)
     print(f"Signature date: {date}")
 
-    # Load puppetmaster
-    print(f"Loading puppetmaster from {args.puppetmaster_key}...")
+    # Parse master specifications
+    try:
+        masters = parse_master_specs(args.masters)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve the puppetmaster password
+    password = resolve_password(args.puppetmaster_password)
+
+    # Load and verify the puppetmaster entity, then its private key from its links
+    try:
+        validate_eid(args.puppetmaster)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Loading puppetmaster entity {args.puppetmaster}...")
     try:
         puppetmaster = load_puppetmaster(
-            args.puppetmaster_key,
-            args.puppetmaster_password,
-            args.puppetmaster_name,
-            args.puppetmaster_location,
-            objects_dir,
-            args.verbose,
-        )
+            args.puppetmaster, password, objects_dir, links_dir, args.verbose)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
-    print(f"Puppetmaster EID: {puppetmaster.get_eid()}")
+    print(f"Puppetmaster EID: {puppetmaster.eid}")
 
-    # Load entities
-    print(f"Loading {len(args.entities)} entity(ies)...")
-    try:
-        entities = load_entities(args.entities, objects_dir, args.verbose)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    for entity in entities:
-        print(f"Entity EID: {entity.get_eid()}")
-
-    # Index entities for master specs resolution
-    entities_by_pub_path = {}
-    entities_by_eid = {puppetmaster.get_eid(): puppetmaster}
-    for attributes, entity in zip(args.entities, entities):
-        entities_by_pub_path[os.path.abspath(parse_entity_spec(attributes)['pub'])] = entity
-        entities_by_eid[entity.get_eid()] = entity
-
-    # Resolve master specifications
-    try:
-        masters = resolve_master_entities(args.masters, entities_by_pub_path, entities_by_eid)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # Generate self-declaration links, signed by each entity
-    total = 0
-    print('Generating entity self-declaration links...')
-    total += generate_self_declaration_links(puppetmaster, date, objects_dir, links_dir, args.verbose)
-    for entity in entities:
-        total += generate_self_declaration_links(entity, date, objects_dir, links_dir, args.verbose)
+    # Verify the master entities
+    if masters:
+        print(f"Verifying {len(masters)} master entity(ies)...")
+        try:
+            for eid, _ in masters:
+                verify_master_entity(eid, objects_dir, links_dir, args.verbose)
+                print(f"Entity EID: {eid}")
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     # Generate recognition links, signed by the puppetmaster
+    total = 0
     print('Generating puppetmaster recognition links...')
-    for entity, types in masters:
-        print(f"  {entity.get_eid()}: master of {', '.join(types)}")
-        total += generate_recognition_links(
-            entity, types, puppetmaster, date, links_dir, args.verbose)
+    for eid, types in masters:
+        print(f"  {eid}: master of {', '.join(types)}")
+        try:
+            total += generate_recognition_links(
+                eid, types, puppetmaster, date, links_dir, args.verbose)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
 
     print(f"Done: {total} bloc links written into {links_dir}/")
     return 0
