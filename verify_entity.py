@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Verify entity script for nebule.
+Version: 020261025
 
 Verifies an entity, typically the result of create_entity.py: checks the
 key pair and the entity self-declaration links found in the l/ folder of

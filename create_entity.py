@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Create entity script for nebule.
+Version: 020261025
 
 Creates a new entity and generates the bloc links that declare it, without
 the web interface and without any external cryptographic command line tool.
 All cryptographic operations (key pair generation and link signatures) are
-done with the python 'cryptography' library.
+done with the Python 'cryptography' library.
 
 Two mutually exclusive key sources:
 - --generate: create a new key pair. The key algorithm type is given with

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Sign master entities script for nebule.
+Version: 020261025
 
 Generates and signs the bloc links that declare and recognize master entities:
 - Each entity (including the puppetmaster) self-declares its own links:
